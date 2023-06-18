@@ -43,7 +43,7 @@ def on_field_match_namespace(old, new, name, namespace, body, uid, logger=None, 
         logger.debug(f'Add secret to namespaces: {to_add}, remove from: {to_remove}')
 
         for secret_namespace in to_add:
-            create_secret(logger, secret_namespace, body)
+            create_or_update_secret(logger, secret_namespace, body)
         for secret_namespace in to_remove:
             delete_secret(logger, secret_namespace, name)
 
@@ -116,7 +116,7 @@ async def create_fn(spec,uid,logger=None,body=None,**kwargs):
     #sync in all matched NS
     logger.info(f'Syncing on Namespaces: {matchedns}')
     for namespace in matchedns:
-        create_secret(logger,namespace,body,v1)
+        create_or_update_secret(logger,namespace,body,v1)
     
     #store status in memory
     csecs[uid]={}
@@ -142,9 +142,76 @@ async def namespace_watcher(spec,patch,logger,meta,body,**kwargs):
         logger.debug(f"new matched list: {ns_new_list}")
         if new_ns in ns_new_list:
             logger.debug(f"Cloning secret {v['body']['metadata']['name']} into the new namespace {new_ns}")
-            create_secret(logger,new_ns,v['body'],v1)
+            create_or_update_secret(logger,new_ns,v['body'],v1)
             # if there is a new matching ns, refresh memory
             v['syncedns'] = ns_new_list
             
     # update ns_new_list on the object so then we also delete from there
     return {'syncedns': ns_new_list}
+
+
+@kopf.on.resume('', 'v1', 'secrets')
+@kopf.on.create('', 'v1', 'secrets')
+async def on_secret_create(spec, patch, logger, meta, body, **kwargs):
+    """
+    Watch for secret creation
+    """
+
+    new_secret_name = meta['name']
+    logger.debug(f"New secret created: {new_secret_name}. Checking if it should be synced by ClusterSecret...")
+    v1 = client.CoreV1Api()
+    result = create_or_update_secrets_from_existing_secret(logger, csecs, body, v1)
+    if result:
+        return result
+    else:
+        logger.debug(f'{new_secret_name} is not managed by ClusterSecret.')
+
+
+@kopf.on.update('', 'v1', 'secrets')
+async def on_secret_update(spec, old, new, diff, patch, logger, meta, body, **kwargs):
+    """
+    Watch for secret update
+    """
+
+    updated_secret_name = meta['name']
+    logger.debug(f"Secret updated: {updated_secret_name}. Checking if it should be synced by ClusterSecret...")
+    v1 = client.CoreV1Api()
+    result = create_or_update_secrets_from_existing_secret(logger, csecs, body, v1)
+    if result:
+        return result
+    else:
+        logger.debug(f'{updated_secret_name} is not managed by ClusterSecret.')
+
+
+#@kopf.on.delete('', 'v1', 'secrets')
+#async def on_secret_delete(spec, uid, body, name, logger, **kwargs):
+#    """
+#    Watch for secret delete
+#    """
+#
+#    logger.debug(f"Secret deleted: {name}. Checking if it should be synced by ClusterSecret...")
+#    v1 = client.CoreV1Api()
+#    for uid, v in csecs.items():
+#        try:
+#            name_from = v['body']['data']['valueFrom']['secretKeyRef']['name']
+#            ns_from = v['body']['data']['valueFrom']['secretKeyRef']['namespace']
+#        except KeyError:
+#            continue
+#
+#        if body['metadata'].get('name') == name_from and body['metadata'].get('namespace') == ns_from:
+#            # get all ns matching.
+#            matchedns = get_ns_list(logger, v['body'], v1)
+#
+#            # sync in all matched NS
+#            logger.info(f'Syncing on Namespaces: {matchedns}')
+#            for namespace in matchedns:
+#                logger.info(f'deleting secret {name} from namespace {namespace}')
+#                delete_secret(logger, namespace, name, v1)
+#                create_or_update_secret(logger, namespace, v['body'], v1)
+#
+#            # delete also from memory: prevent syncing with new namespaces
+#            try:
+#                csecs.pop(uid)
+#                logger.debug(f"csec {uid} deleted from memory ok")
+#            except KeyError as k:
+#                logger.info(f" This csec were not found in memory, maybe it was created in another run: {k}")

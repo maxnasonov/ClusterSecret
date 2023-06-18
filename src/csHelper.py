@@ -111,7 +111,7 @@ def delete_secret(logger,namespace,name,v1=None):
             logger.warning(" Something weird deleting the secret")
             logger.debug(f"details: {e}")
 
-def create_secret(logger,namespace,body,v1=None):
+def create_or_update_secret(logger,namespace,body,v1=None):
     """Creates a given secret on a given namespace
     """
     if v1 is None:
@@ -160,10 +160,38 @@ def create_secret(logger,namespace,body,v1=None):
         api_response = v1.create_namespaced_secret(namespace, body)
     except client.rest.ApiException as e:
         if e.reason == 'Conflict':
-            logger.info(f"secret `{sec_name}` already exist in namespace '{namespace}'")
+            logger.info(f"secret `{sec_name}` already exist in namespace '{namespace}'. Updating...")
+            patch_body = {}
+            patch_body['data'] = data
+            api_response = v1.patch_namespaced_secret(sec_name, namespace, patch_body)
             return 0
         logger.error(f'Can not create a secret, it is base64 encoded? enable debug for details')
         logger.debug(f'data: {data}')
         logger.debug(f'Kube exception {e}')
         return 1
     return 0
+
+def create_or_update_secrets_from_existing_secret(logger, csecs, body, v1):
+    for uid, v in csecs.items():
+        try:
+            name_from = v['body']['data']['valueFrom']['secretKeyRef']['name']
+            ns_from = v['body']['data']['valueFrom']['secretKeyRef']['namespace']
+        except KeyError:
+            continue
+
+        if body['metadata'].get('name') == name_from and body['metadata'].get('namespace') == ns_from:
+            # get all ns matching.
+            matchedns = get_ns_list(logger, v['body'], v1)
+
+            # sync in all matched NS
+            logger.info(f'Syncing on Namespaces: {matchedns}')
+            for namespace in matchedns:
+                create_or_update_secret(logger, namespace, v['body'], v1)
+
+            # store status in memory
+            csecs[uid] = {}
+            csecs[uid]['body'] = body
+            csecs[uid]['syncedns'] = matchedns
+
+            return {'syncedns': matchedns}
+    return False
